@@ -243,16 +243,18 @@ def morse_to_text_seq(model, morse_text, device):
     return "".join(out)
 
 
-def prefix_trace(model, device, code):
-    """show the net changing its mind as each symbol arrives (its memory)."""
+def prefix_traces(model, device):
+    """all letters: which char the net predicts after each symbol prefix."""
     model.eval()
-    print(f"  prefixes of {code!r} (net decides as symbols arrive):")
     with torch.no_grad():
-        for i in range(1, len(code) + 1):
-            prefix = code[:i]
-            seq = code_to_seq(prefix).unsqueeze(0).to(device)
-            pred = int(model(seq, torch.tensor([len(prefix)])).argmax(1))
-            print(f"    {prefix!r:>8} -> {morse_data.MORSE_CODES[pred][0]}")
+        for idx, (char, code) in enumerate(morse_data.MORSE_CODES):
+            steps, h = [], None
+            for ch in code:
+                x = model.emb(code_to_seq(ch).unsqueeze(0).to(device))
+                _, h = model.gru(x, h)
+                pred = morse_data.MORSE_CODES[int(model.fc(h[-1]).argmax(1))][0]
+                steps.append(f"{ch}->{pred}")
+            print(f"  {char} {code:<6} : {', '.join(steps)}")
 
 
 def stream_morse_to_text(model, segments, device):
@@ -277,20 +279,18 @@ def stream_morse_to_text(model, segments, device):
     return "".join(out)
 
 
-def confidence_trace(model, code, device):
-    """P(correct letter) growing symbol by symbol; the client commits at the
-    detected break (readout happens there, but the ambiguity vanishes once
-    the last symbol of the letter is in the state)."""
-    idx = next(i for i, (_, c) in enumerate(morse_data.MORSE_CODES) if c == code)
-    target = morse_data.MORSE_CODES[idx][0]
+def confidence_traces(model, device):
+    """all letters: P(correct char) after each symbol (client commits at break)."""
     model.eval()
-    h = None
     with torch.no_grad():
-        for ch in code:
-            x = model.emb(code_to_seq(ch).unsqueeze(0).to(device))
-            _, h = model.gru(x, h)
-            prob = F.softmax(model.fc(h[-1]), dim=-1)[0, idx].item()
-            print(f"    after {ch}: P({target}) = {prob:.3f}")
+        for idx, (char, code) in enumerate(morse_data.MORSE_CODES):
+            h, probs = None, []
+            for ch in code:
+                x = model.emb(code_to_seq(ch).unsqueeze(0).to(device))
+                _, h = model.gru(x, h)
+                p = F.softmax(model.fc(h[-1]), dim=-1)[0, idx].item()
+                probs.append(f"{p:.2f}")
+            print(f"  {char} {code:<6} : P({char}) per symbol = {' '.join(probs)}")
 
 
 # ------------------------------------------------------------------ experiment
@@ -324,17 +324,15 @@ def run(args):
             print("  SOS  :", morse_to_text_seq(model, "... --- ...", device))
             print("  HELLO:", morse_to_text_seq(model, ".... . .-.. .-.. ---", device))
             print()
-            prefix_trace(model, device, "---")   # T -> M -> O
-            prefix_trace(model, device, "..")    # E -> I
-            prefix_trace(model, device, "...")   # S is only decided on the 3rd dot
+            print("  prefix memory: what the net predicts after each symbol (all 43 letters):")
+            prefix_traces(model, device)
         else:
             # client already found the breaks; RNN just consumed each letter's
             # symbols and got reset by the client at every break
             print("  SOS  :", stream_morse_to_text(model, ["...", "---", "..."], device))
             print("  HELLO:", stream_morse_to_text(model, ["....", ".", ".-..", ".-..", "---"], device))
-            print("\n  confidence per symbol of one letter (client commits at the break):")
-            confidence_trace(model, ".-", device)
-            confidence_trace(model, "...", device)
+            print("\n  per-symbol confidence of each letter (client commits at the break):")
+            confidence_traces(model, device)
     else:
         if args.model == "mlp":
             print("== parity-style MLP on padded fixed-length input ==")
