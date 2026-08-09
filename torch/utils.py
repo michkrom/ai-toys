@@ -48,6 +48,8 @@ class NNet(nn.Module):
         optimizer=None,
         criterion=None,
         progress_reporter=None,
+        device=None,
+        converge_at=None,
     ):
         # Our signature shadows nn.Module.train(mode). Support the base-class
         # call style so containers can toggle mode / eval() without breaking.
@@ -61,27 +63,39 @@ class NNet(nn.Module):
             criterion = nn.MSELoss()
         if progress_reporter is None:
             progress_reporter = lambda epoch, loss: print(
-                f"Epoch: {epoch}, Loss: {loss:.4f}"
+                f"Epoch: {epoch}, Loss: {loss:.6f}"
             )
 
         train_dataset = DatasetFeeder(train_data)
         train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 
         train_loss_values = []
+        converged_epoch = None
+        num_samples = len(train_dataset)
 
         for epoch in range(epochs):
+            total = 0.0
             for input, output in train_loader:
+                if device is not None:
+                    input, output = input.to(device), output.to(device)
                 # Forward pass
                 outputs = self(input)
                 loss = criterion(outputs, output)
+                total += loss.item() * len(input)
                 # Backward pass and optimize
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-            train_loss_values.append((epoch, loss.item()))
-            progress_reporter(epoch + 1, loss.item())
+            mean_loss = total / num_samples
+            train_loss_values.append((epoch, mean_loss))
+            progress_reporter(epoch + 1, mean_loss)
+            if converge_at is not None and mean_loss <= converge_at:
+                converged_epoch = epoch + 1
+                break
 
         self.train_loss_values = train_loss_values
+        self.converged_at_epoch = converged_epoch
+        return converged_epoch
 
     def visualize_training(self):
         import matplotlib.pyplot as plt

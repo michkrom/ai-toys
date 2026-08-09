@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Morse encoder toy: learn to spell a character (A-Z, 0-9, punctuation,
-43 classes) in morse code.
+morse.py — ML experiment: learn to spell a character in morse code.
 
-    input  : one-hot vector of the character index (43 dims)
+    input  : one-hot vector of the character index (43 classes: A-Z, 0-9, ..)
     output : 6 symbol slots, each classified as dot / dash / silence
              (padding) -> 6*3 logits
     loss   : per-position CrossEntropyLoss
@@ -11,27 +10,33 @@ Morse encoder toy: learn to spell a character (A-Z, 0-9, punctuation,
 Because the input is just a character index, this is effectively a
 lookup-table task. The interesting generalization variants (audio-in,
 noisy sequence decoding) are the subject of morseDecode.py.
+
+Run directly (./morse.py) or as a cli.py subcommand:
+    ./cli.py morse-encode [--acceleration auto|cpu|gpu|gpu:N] [--seed N] [--epochs N]
 """
+import argparse
 import random
-import warnings
 
-warnings.filterwarnings("ignore")
-
+import common  # sets warnings filter + shared torch init; import before torch
 import torch
+from torch import nn
 from torch.nn import functional as F
 
-import morseCode
+import morse_data
 from utils import NNet
 
 MAX_SYMBOLS = 6
-N_SYMBOLS = len(morseCode.morseCode)  # 43 rows: letters, digits, punctuation
+N_CLASSES = len(morse_data.MORSE_CODES)              # 43
 SYMBOL_TARGETS = (".", "-", " ")
+DEFAULT_EPOCHS = 30
+DEFAULT_SAMPLES = 20000
+CONVERGE_AT = 1e-4   # stop training once mean loss is (displayively) 0
 
 
-# ---------------------------------------------------------------- data
+# ------------------------------------------------------------------ data
 def char_to_input(index):
     """one-hot vector for a character index -- a proper NN input."""
-    x = torch.zeros(N_SYMBOLS)
+    x = torch.zeros(N_CLASSES)
     x[index] = 1.0
     return x
 
@@ -45,39 +50,18 @@ def code_to_target(mcode):
     return target
 
 
-def gen_data(data_len):
+def gen_data(num_samples):
     data = []
-    for _ in range(data_len):
-        index = random.randrange(N_SYMBOLS)  # [0, N) -- no off-by-one
-        code = morseCode.morseCode[index][1]
-        data.append((char_to_input(index), code_to_target(code)))
+    for _ in range(num_samples):
+        index = random.randrange(N_CLASSES)
+        data.append((char_to_input(index), code_to_target(morse_data.MORSE_CODES[index][1])))
     return data
 
 
-# ---------------------------------------------------------------- decode / eval
+# ------------------------------------------------------------------ decode / eval
 def logits_to_morse(logits):
     """tensor(18) logits -> string of '.', '-' and ' '."""
     return "".join(SYMBOL_TARGETS[i] for i in logits.view(6, 3).argmax(dim=1))
-
-
-def check_data(data):
-    """Verify the encoders are consistent: index -> code -> target -> code."""
-    for x, y in data:
-        index = int(x.argmax().item())
-        code = morseCode.morseCode[index][1]
-        decoded = logits_to_morse(y.view(-1)).replace(" ", "")
-        assert code == decoded, (index, code, decoded)
-
-
-def test_inference():
-    good = 0
-    for index in range(N_SYMBOLS):
-        char, expected = morseCode.morseCode[index]
-        predicted = logits_to_morse(model(char_to_input(index))).replace(" ", "")
-        good += expected == predicted
-        if expected != predicted:
-            print(f"{char} |{expected}|, |{predicted}|")
-    print(f"{int(100 * good / N_SYMBOLS)}% ({good}/{N_SYMBOLS})")
 
 
 def seq_cross_entropy(logits, targets):
@@ -85,16 +69,68 @@ def seq_cross_entropy(logits, targets):
     return F.cross_entropy(logits.view(-1, 3), targets.view(-1, 3).argmax(dim=-1))
 
 
-# ---------------------------------------------------------------- model
-torch.manual_seed(0)
-random.seed(0)
+# ------------------------------------------------------------------ experiment
+def add_args(parser):
+    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
+    parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
 
-# small net: one-hot(43) -> 64 -> 64 -> 18 logits
-model = NNet(N_SYMBOLS, ((64, torch.nn.ReLU()), (64, torch.nn.ReLU()), MAX_SYMBOLS * 3))
-print(model)
 
-train_data = gen_data(20000)
-check_data(train_data)
+def run(args):
+    device = args.device
+    if args.seed is None:  # common.init_torch already seeded if --seed given
+        random.seed(0)
+        torch.manual_seed(0)
 
-model.train(train_data, epochs=30, learning_rate=0.001, criterion=seq_cross_entropy)
-test_inference()
+    model = NNet(N_CLASSES, ((64, nn.ReLU()), (64, nn.ReLU()), MAX_SYMBOLS * 3)).to(device)
+    print(f"== encode: char -> morse code, device: {common.describe_device(device)}")
+    print(model)
+    print(f"   size: {common.model_summary(model)[1]:,} parameters")
+
+    train_data = gen_data(args.samples)
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(
+            torch.stack([x for x, _ in train_data]),
+            torch.stack([y for _, y in train_data]),
+        ),
+        batch_size=32, shuffle=True,
+    )
+    opt = torch.optim.Adam(model.parameters(), lr=0.001)
+    model.training = True  # NNet shadows .train(); no dropout here so the flag suffices
+
+    for epoch in range(args.epochs):
+        total = 0.0
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            opt.zero_grad()
+            loss = seq_cross_entropy(model(x), y)
+            loss.backward()
+            opt.step()
+            total += loss.item() * len(x)
+        mean_loss = total / len(train_data)
+        print(f"Epoch: {epoch + 1:3d}, Loss: {mean_loss:.6f}")
+        if mean_loss <= CONVERGE_AT:
+            print(f"  [converged at epoch {epoch + 1}, stopping early]")
+            break
+
+    # evaluate on all 43 table entries
+    model.eval()
+    good = 0
+    with torch.no_grad():
+        for index in range(N_CLASSES):
+            expected = morse_data.MORSE_CODES[index][1]
+            predicted = logits_to_morse(model(char_to_input(index).to(device))).replace(" ", "")
+            good += expected == predicted
+            if expected != predicted:
+                print(f"  {morse_data.MORSE_CODES[index][0]} |{expected}|, |{predicted}|")
+    print(f"{int(100 * good / N_CLASSES)}% ({good}/{N_CLASSES})")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    common.add_torch_args(parser)
+    add_args(parser)
+    run(common.finish_args(parser.parse_args(argv)))
+
+
+if __name__ == "__main__":
+    main()

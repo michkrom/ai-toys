@@ -1,82 +1,94 @@
 # torch — PyTorch playground
 
-Small ML experiments in PyTorch. Each script is self-contained: a printed
-brief, synthesized training data, a small net, and an evaluation over the
-complete finite table.
+Small ML experiments in PyTorch: each toy synthesizes its own data, trains a
+tiny net, and evaluates on the complete finite table. Everything runs through
+one CLI with a single shared torch init (device / seed / threads).
 
 ## Requirements
 
 ```bash
 pip install torch        # numpy comes with most torch installs
-pip install matplotlib   # optional, only for utils.NNet.visualize_training()
+# CUDA GPUs are used automatically when present (--device auto)
 ```
 
-## The ML scripts
-
-### `morse.py` — NN that learns morse encoding
-
-Trains a small MLP to spell a **character** in morse code: one-hot vector of
-the character index (43 symbols: A–Z, 0–9, punctuation) → 6 symbol slots,
-each classified as dot / dash / silence (padding); per-position
-cross-entropy.
+## Usage — one CLI for everything
 
 ```bash
-./morse.py        # or: python3 morse.py
+cd torch
+
+./cli.py morse-encode    [--epochs N] [--samples N] [--acceleration auto|cpu|gpu|gpu:N] [--seed N] [--threads N]
+./cli.py morse-decode    [same flags] [--model mlp|gru]
+./cli.py parity-learn    [same flags]
+./cli.py morse-translate [--verbose] [FILE]      # non-ML reference translator
 ```
 
-Output: loss per epoch, then evaluation over all 43 symbols.
+Common flags (from `common.py`, applied to all ML subcommands):
 
-```
-Epoch: 30, Loss: 0.0000
-100% (43/43)
-```
+| flag | meaning |
+|---|---|
+| `--acceleration auto\|cpu\|gpu\|gpu:N` (alias `--accel`) | compute acceleration; `auto` (default) uses **GPU** (cuda:0) when available, else CPU; `cpu` forces CPU; `gpu:N` picks GPU number N (`nvidia-smi` to list); `cuda:N` accepted too |
+| `--seed N` | seed python+torch RNGs (default: per-experiment defaults) |
+| `--threads N` | limit torch CPU threads (useful on shared/loaded machines) |
+| `--epochs N`, `--samples N` | training length / dataset size |
 
-Note: because the input is a character index, this is effectively a
-lookup-table task — an NN is convenient here, not magical. The problems
-where sequences/audio actually need learning are covered by `morseDecode.py`
-and its docstring.
+Every run prints an explicit banner naming the device actually used, e.g.
+`[cli] run=decode device=cuda:0 (NVIDIA RTX A2000 12GB)`.
 
-### `parity.py` — NN that learns the parity bit
-
-Trains a small MLP to predict the parity bit (popcount % 2) of a 7-bit byte
-(128 possible inputs), then evaluates on all of them.
+Examples:
 
 ```bash
-./parity.py        # or: python3 parity.py
+./cli.py morse-decode --model gru             # defaults to GPU (cuda:0)
+./cli.py morse-encode --accel gpu:1           # pick the other GPU (cuda:1)
+./cli.py parity-learn --acceleration cpu      # no GPU
+./cli.py parity-learn --epochs 100 --threads 4
+./cli.py morse-decode --model mlp --seed 7    # reproducible run
+./cli.py morse-translate <<< "SOS"           # ... --- ...
 ```
 
-Output: a short brief (input/net/test), loss per epoch, then
-`Inference Accuracy: 100.00% (128 correct out of 128 samples)`.
+The experiment scripts can also still be run directly (`./morse.py`, etc.),
+but the CLI is the intended entry point.
 
-### `morseDecode.py` — NN that decodes morse → ASCII
+## The ML experiments
 
-The reverse problem: a variable-length `'.'`/`'-'` sequence (e.g. `.- → A`)
-maps to the 43-class character. Same recipe as `parity.py` (synth data →
-train small net → evaluate the whole table), comparing two models:
+### `morse-encode` (`morse.py`) — learn char → morse code
 
-1. parity-style MLP on padded fixed-length input
-2. GRU sequence model (the architecturally honest choice for variable-length input)
+One-hot character index (43 classes) → 6 symbol slots, each classified as
+dot / dash / silence (padding); per-position cross-entropy. Effectively a
+lookup-table task — an NN is convenient here, not magical; the problems
+where sequences/audio actually need learning are the `decode` experiment.
 
-```bash
-./morseDecode.py
-```
+### `morse-decode` (`morseDecode.py`) — learn morse code → char
 
-Both reach 100% (43/43); a live demo at the end decodes space-separated
-morse → text (SOS, HELLO). The still-unsolved variant — segmenting a
-continuous stream with no inter-symbol gaps — is discussed in the docstring.
+The reverse problem: variable-length `'.'`/`'-'` sequence → 43-class
+character. Three models, `--model <mlp|gru|rnn>`:
+
+1. `mlp` — parity-style fixed-length MLP on the padded 18-dim vector (baseline)
+2. `gru` — padded (6,3) sequence read as time steps
+3. `rnn` — **true symbol-by-symbol RNN**: only the real `.`/`-` tokens are
+   fed, one per timestep (`pack_padded_sequence`, zero padding steps); the
+   final hidden state decides the char, so the net must remember the whole
+   prefix — morse codes share prefixes (`.`=E, `..`=I, `...`=S), and the run
+   ends with a prefix-trace demo showing the net change its mind as symbols
+   arrive
+
+Every run prints the model's **topology and parameter count** (e.g.
+`topology: Embedding 2->8, GRU 8->32 x1, Linear 32->43 (1,987 parameters)`).
+All models reach 100% (43/43) and end with a live demo decoding
+space-separated morse → text (SOS, HELLO). The still-unsolved variant —
+segmenting a continuous stream with no inter-symbol gaps — needs a search /
+language model and is discussed in the module docstring.
+
+### `parity-learn` (`parity.py`) — learn the parity bit
+
+7 input bits → parity bit (popcount % 2), 2-way classification, trained with
+MSE on one-hot labels; evaluated on all 128 bytes. The classic "first real
+ML" playground and the baseline pattern for the other experiments.
 
 ## Support files
 
-- `utils.py` — shared plumbing: `NNet` (generic MLP with train loop,
-  `visualize_training()`) and `DatasetFeeder`.
-- `morseCode.py` — plain (non-ML) text→morse translator; also the data table
-  that `morse.py` and `morseDecode.py` import for training data.
-
-### `morseCode.py` — plain reference translator (no ML)
-
-```bash
-echo "SOS" | ./morseCode.py            # → ... --- ...
-./morseCode.py message.txt             # translate a file
-./morseCode.py --verbose <<< "HI"       # char-by-char breakdown
-./morseCode.py --help                  # full usage
-```
+- `cli.py` — single CLI entry point (subcommands, one torch init per run).
+- `common.py` — shared torch init: warnings, `--device/--seed/--threads`.
+- `utils.py` — `NNet` (generic MLP with train loop) and `DatasetFeeder`.
+- `morse_data.py` — morse table (43 entries) + pure text↔code helpers, used by
+  the experiments and the `translate` command (no torch, import-safe).
+  (The old `morseCode.py` CLI was folded into the `morse-translate` subcommand.)

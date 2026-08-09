@@ -1,49 +1,54 @@
 #!/usr/bin/env python3
 """
-morseDecode.py — ML: decode morse symbol sequences into ASCII characters.
-
-Same recipe as parity.py: synthesize data -> train a small net -> evaluate on
-the whole table.
+morseDecode.py — ML experiment: decode morse symbol sequences into ASCII.
 
     input  : variable-length '.'/'-' sequence, e.g. ".-" -> 'A'
     output : 43-class softmax over the symbol table (A-Z, 0-9, punctuation)
 
-Two models are compared:
-  1. MLP baseline (parity-style): symbol sequence padded to 6 slots (one-hot
-     per slot: pad/dot/dash) -> flat 18 dims -> MLP -> 43 logits.
-  2. GRU: the same padded sequence fed as (6,3) time steps; the recurrent net
-     is the architecturally honest way to read a variable-length symbol code.
+Three models, selected with --model:
+  mlp: parity-style MLP on padded fixed-length input (default)
+  gru: recurrent net reading the (6,3) symbol sequence -- the architecturally
+       honest way to handle variable-length input
+  rnn: true symbol-by-symbol RNN -- only the real '.'/'-' tokens are fed, one
+       per timestep (packed, no padding steps); the final hidden state is the
+       memory that classifies the char, so it must remember the whole prefix
 
-NOTE: with a clean, finite table this is still a 43-row lookup-style task, but
-unlike morse.py (char -> code, fixed input) the *input* here is a true
-variable-length sequence, so the GRU/MLP choice actually matters once inputs
-get noisy or hand-keyed. The hard/unsolved variant is decoding a continuous
-stream with no inter-symbol gaps (segmentation + language model).
+Every run prints the model's topology and parameter count.
+
+Same recipe as parity.py: synthesize data -> train a small net -> evaluate on
+the whole table. The still-unsolved variant (dealing with a continuous stream
+that has no inter-symbol gaps) would need segmentation + a language model.
+
+Run directly (./morseDecode.py) or as a cli.py subcommand:
+    ./cli.py morse-decode [--model mlp|gru] [--acceleration auto|cpu|gpu|gpu:N] [--seed N]
+                    [--epochs N]
 """
+import argparse
 import random
-import warnings
 
-warnings.filterwarnings("ignore")
-
+import common  # sets warnings filter + shared torch init; import before torch
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
-import morseCode
+import morse_data
 from utils import DatasetFeeder, NNet
 
-MAX_LEN = max(len(code) for _, code in morseCode.morseCode)  # 6 slots
-N_CLASSES = len(morseCode.morseCode)                         # 43
+MAX_LEN = max(len(code) for _, code in morse_data.MORSE_CODES)  # 6 slots
+N_CLASSES = len(morse_data.MORSE_CODES)                         # 43
+DEFAULT_EPOCHS = 30
+DEFAULT_SAMPLES = 10000
+CONVERGE_AT = 1e-4   # stop training once mean loss is (displayively) 0
 
-# sanity: every char must have a unique code (it does) and fit in MAX_LEN slots
-codes = [code for _, code in morseCode.morseCode]
+# sanity: unique codes, all fitting in MAX_LEN slots
+codes = [code for _, code in morse_data.MORSE_CODES]
 assert len(set(codes)) == N_CLASSES, "duplicate morse codes in table"
 assert MAX_LEN <= 6
 
 
 # ------------------------------------------------------------------ data
-def code_to_input(code):
+def code_to_input(code, device=None):
     """'.-' -> tensor(6,3): one-hot over (pad, dot, dash) in each slot."""
     t = torch.zeros(MAX_LEN, 3)
     t[:, 0] = 1.0
@@ -52,26 +57,24 @@ def code_to_input(code):
             t[i] = torch.tensor([0.0, 1.0, 0.0])
         elif c == "-":
             t[i] = torch.tensor([0.0, 0.0, 1.0])
-    return t
+    return t.to(device) if device is not None else t
 
 
-def gen_data(num_samples):
+def gen_data(num_samples, device=None):
     """random table entry -> (padded symbol one-hot, class id)"""
     data = []
     for _ in range(num_samples):
         idx = random.randrange(N_CLASSES)
-        data.append(
-            (code_to_input(morseCode.morseCode[idx][1]),
-             torch.tensor(idx, dtype=torch.long))
-        )
+        x = code_to_input(morse_data.MORSE_CODES[idx][1], device)
+        data.append((x, torch.tensor(idx, dtype=torch.long, device=device)))
     return data
 
 
 # ------------------------------------------------------------------ training
-def train_model(model, data, epochs=30, lr=1e-3, batch_size=32):
+def train_model(model, data, epochs=DEFAULT_EPOCHS, lr=1e-3, batch_size=32):
     loader = DataLoader(DatasetFeeder(data), batch_size=batch_size, shuffle=True)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    nn.Module.train(model)  # toggles both the wrapper and its NNet child
+    model.train()
     for epoch in range(epochs):
         total = 0.0
         for x, y in loader:
@@ -80,31 +83,35 @@ def train_model(model, data, epochs=30, lr=1e-3, batch_size=32):
             loss.backward()
             opt.step()
             total += loss.item() * len(y)
-        print(f"  epoch {epoch + 1:3d}  loss {total / len(data):.4f}")
+        mean_loss = total / len(data)
+        print(f"  epoch {epoch + 1:3d}  loss {mean_loss:.6f}")
+        if mean_loss <= CONVERGE_AT:
+            print(f"  [converged at epoch {epoch + 1}, stopping early]")
+            break
 
 
-def evaluate(model):
+def evaluate(model, device):
     model.eval()
     correct = 0
     with torch.no_grad():
-        for idx, (char, code) in enumerate(morseCode.morseCode):
-            logits = model(code_to_input(code).unsqueeze(0))
+        for idx, (char, code) in enumerate(morse_data.MORSE_CODES):
+            logits = model(code_to_input(code, device).unsqueeze(0))
             pred = int(logits.argmax(1))
             if pred == idx:
                 correct += 1
             else:
-                print(f"  {char} |{code}| -> {morseCode.morseCode[pred][0]}")
+                print(f"  {char} |{code}| -> {morse_data.MORSE_CODES[pred][0]}")
     print(f"  {int(100 * correct / N_CLASSES)}% ({correct}/{N_CLASSES})")
 
 
-def morse_to_text(model, morse_text):
+def morse_to_text(model, morse_text, device):
     """space-separated morse -> plain text, decoded by the trained net."""
     model.eval()
     out = []
     with torch.no_grad():
         for token in morse_text.split():
-            logits = model(code_to_input(token).unsqueeze(0))
-            out.append(morseCode.morseCode[int(logits.argmax(1))][0])
+            logits = model(code_to_input(token, device).unsqueeze(0))
+            out.append(morse_data.MORSE_CODES[int(logits.argmax(1))][0])
     return "".join(out)
 
 
@@ -133,19 +140,169 @@ class GRUClassifier(nn.Module):
         return self.fc(out[:, -1])    # classify after last (padded) step
 
 
-random.seed(0)
-torch.manual_seed(0)
+class SymbolRNN(nn.Module):
+    """true variable-length decoder: one symbol per timestep, no padding.
 
-print("== 1) parity-style MLP on padded fixed-length input ==")
-mlp = FlattenMLP(NNet(MAX_LEN * 3, ((64, nn.ReLU()), (64, nn.ReLU()), N_CLASSES)))
-train_model(mlp, gen_data(10000))
-evaluate(mlp)
+    Reads '.'/'-' symbol ids one at a time (pack_padded_sequence); the final
+    hidden state after the LAST real symbol is the memory used for the
+    classification -- the net must remember the whole prefix because morse
+    codes share prefixes ('.'=E vs '.-'=A vs '.--'=W ...).
+    """
 
-print("\n== 2) GRU sequence model on the same data ==")
-gru = GRUClassifier()
-train_model(gru, gen_data(10000))
-evaluate(gru)
+    def __init__(self, vocab=2, embed=8, hidden=32, out=N_CLASSES):
+        super().__init__()
+        self.emb = nn.Embedding(vocab, embed)
+        self.gru = nn.GRU(embed, hidden, batch_first=True)
+        self.fc = nn.Linear(hidden, out)
 
-print("\n== decode demo (GRU) ==")
-print("  SOS  :", morse_to_text(gru, "... --- ..."))
-print("  HELLO:", morse_to_text(gru, ".... . .-.. .-.. ---"))
+    def forward(self, seqs, lengths):
+        embedded = self.emb(seqs)
+        packed = nn.utils.rnn.pack_padded_sequence(
+            embedded, lengths.cpu(), batch_first=True, enforce_sorted=False
+        )
+        _, hidden = self.gru(packed)
+        return self.fc(hidden[-1])  # memory after the last real symbol
+
+
+# ------------------------------------------------------------------ rnn data
+def code_to_seq(code):
+    """'.-' -> tensor of symbol ids (0=dot, 1=dash), true variable length."""
+    return torch.tensor([0 if c == "." else 1 for c in code], dtype=torch.long)
+
+
+def gen_seq_data(num_samples):
+    data = []
+    for _ in range(num_samples):
+        idx = random.randrange(N_CLASSES)
+        code = morse_data.MORSE_CODES[idx][1]
+        data.append((code_to_seq(code), torch.tensor(idx, dtype=torch.long)))
+    return data
+
+
+def collate_seqs(batch):
+    """pad codes to the longest in the batch; real lengths shipped separately."""
+    seqs, ys = zip(*batch)
+    max_len = max(len(s) for s in seqs)
+    padded = torch.stack([F.pad(s, (0, max_len - len(s))) for s in seqs])
+    lengths = torch.tensor([len(s) for s in seqs], dtype=torch.long)
+    return padded, torch.stack(ys), lengths
+
+
+def train_seq_model(model, data, device, epochs=DEFAULT_EPOCHS, lr=1e-3, batch_size=32):
+    loader = DataLoader(DatasetFeeder(data), batch_size=batch_size, shuffle=True,
+                        collate_fn=collate_seqs)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    model.train()
+    for epoch in range(epochs):
+        total = 0.0
+        for seqs, ys, lengths in loader:
+            opt.zero_grad()
+            loss = F.cross_entropy(model(seqs.to(device), lengths), ys.to(device))
+            loss.backward()
+            opt.step()
+            total += loss.item() * len(ys)
+        mean_loss = total / len(data)
+        print(f"  epoch {epoch + 1:3d}  loss {mean_loss:.6f}")
+        if mean_loss <= CONVERGE_AT:
+            print(f"  [converged at epoch {epoch + 1}, stopping early]")
+            break
+
+
+def eval_seq(model, device):
+    model.eval()
+    correct = 0
+    with torch.no_grad():
+        for idx, (char, code) in enumerate(morse_data.MORSE_CODES):
+            seq = code_to_seq(code).unsqueeze(0).to(device)
+            lengths = torch.tensor([len(code)])
+            pred = int(model(seq, lengths).argmax(1))
+            if pred == idx:
+                correct += 1
+            else:
+                print(f"  {char} |{code}| -> {morse_data.MORSE_CODES[pred][0]}")
+    print(f"  {int(100 * correct / N_CLASSES)}% ({correct}/{N_CLASSES})")
+
+
+def morse_to_text_seq(model, morse_text, device):
+    """space-separated morse -> plain text (variable-length RNN decoder)."""
+    model.eval()
+    out = []
+    with torch.no_grad():
+        for token in morse_text.split():
+            seq = code_to_seq(token).unsqueeze(0).to(device)
+            pred = int(model(seq, torch.tensor([len(token)])).argmax(1))
+            out.append(morse_data.MORSE_CODES[pred][0])
+    return "".join(out)
+
+
+def prefix_trace(model, device, code):
+    """show the net changing its mind as each symbol arrives (its memory)."""
+    model.eval()
+    print(f"  prefixes of {code!r} (net decides as symbols arrive):")
+    with torch.no_grad():
+        for i in range(1, len(code) + 1):
+            prefix = code[:i]
+            seq = code_to_seq(prefix).unsqueeze(0).to(device)
+            pred = int(model(seq, torch.tensor([len(prefix)])).argmax(1))
+            print(f"    {prefix!r:>8} -> {morse_data.MORSE_CODES[pred][0]}")
+
+
+# ------------------------------------------------------------------ experiment
+def add_args(parser):
+    parser.add_argument("--model", choices=("mlp", "gru", "rnn"), default="mlp")
+    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
+    parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
+
+
+
+def run(args):
+    device = args.device
+    if args.seed is None:
+        random.seed(0)
+    torch.manual_seed(0)
+
+    if args.model == "rnn":
+        print("== symbol-RNN: one symbol per step, variable length (memory) ==")
+        model = SymbolRNN().to(device)
+        topology, params = common.model_summary(model)
+        print(f"   device: {common.describe_device(device)}")
+        print(f"   topology: {topology}   ({params:,} parameters)")
+        train_seq_model(model, gen_seq_data(args.samples), device, epochs=args.epochs)
+        eval_seq(model, device)
+        print("\n== decode demo (trained net) ==")
+        print("  SOS  :", morse_to_text_seq(model, "... --- ...", device))
+        print("  HELLO:", morse_to_text_seq(model, ".... . .-.. .-.. ---", device))
+        print()
+        prefix_trace(model, device, "---")   # T -> M -> O
+        prefix_trace(model, device, ".-")    # E -> A
+        prefix_trace(model, device, "...")   # S is only decided on the 3rd dot
+    else:
+        if args.model == "mlp":
+            print("== parity-style MLP on padded fixed-length input ==")
+            model = FlattenMLP(
+                NNet(MAX_LEN * 3, ((64, nn.ReLU()), (64, nn.ReLU()), N_CLASSES))
+            ).to(device)
+        else:
+            print("== GRU sequence model ==")
+            model = GRUClassifier().to(device)
+        topology, params = common.model_summary(model)
+        print(f"   device: {common.describe_device(device)}")
+        print(f"   topology: {topology}   ({params:,} parameters)")
+
+        train_model(model, gen_data(args.samples, device), epochs=args.epochs)
+        evaluate(model, device)
+
+        print("\n== decode demo (trained net) ==")
+        print("  SOS  :", morse_to_text(model, "... --- ...", device))
+        print("  HELLO:", morse_to_text(model, ".... . .-.. .-.. ---", device))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    common.add_torch_args(parser)
+    add_args(parser)
+    run(common.finish_args(parser.parse_args(argv)))
+
+
+if __name__ == "__main__":
+    main()
