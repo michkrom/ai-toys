@@ -60,7 +60,7 @@ where sequences/audio actually need learning are the `decode` experiment.
 ### `morse-decode` (`morseDecode.py`) — learn morse code → char
 
 The reverse problem: variable-length `'.'`/`'-'` sequence → 43-class
-character. Three models, `--model <mlp|gru|rnn>`:
+character. Three models, `--model <mlp|gru|rnn|stream>`:
 
 1. `mlp` — parity-style fixed-length MLP on the padded 18-dim vector (baseline)
 2. `gru` — padded (6,3) sequence read as time steps
@@ -70,6 +70,12 @@ character. Three models, `--model <mlp|gru|rnn>`:
    prefix — morse codes share prefixes (`.`=E, `..`=I, `...`=S), and the run
    ends with a prefix-trace demo showing the net change its mind as symbols
    arrive
+4. `stream` — **Option A streaming decode**: the same RNN, but letters are
+   decoded one after another from a live stream; the *client* detects each
+   letter break (from gap timing), classifies from the accumulated hidden
+   state, then **resets the RNN state to zeros** for the next letter — no
+   gap tokens in the input. Shows per-symbol confidence: the correct letter's
+   probability jumps only once its last symbol is in memory
 
 Every run prints the model's **topology and parameter count** (e.g.
 `topology: Embedding 2->8, GRU 8->32 x1, Linear 32->43 (1,987 parameters)`).

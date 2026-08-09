@@ -12,6 +12,11 @@ Three models, selected with --model:
   rnn: true symbol-by-symbol RNN -- only the real '.'/'-' tokens are fed, one
        per timestep (packed, no padding steps); the final hidden state is the
        memory that classifies the char, so it must remember the whole prefix
+  stream: Option A streaming decode -- same RNN, but letters arrive one after
+       another and the CLIENT (from gap timing) detects each letter break,
+       classifies from the accumulated hidden state, then resets it to zeros
+       for the next letter. No gap tokens in the input; the confidence in the
+       correct letter only materializes after its last symbol arrives.
 
 Every run prints the model's topology and parameter count.
 
@@ -40,6 +45,9 @@ N_CLASSES = len(morse_data.MORSE_CODES)                         # 43
 DEFAULT_EPOCHS = 30
 DEFAULT_SAMPLES = 10000
 CONVERGE_AT = 1e-4   # stop training once mean loss is (displayively) 0
+
+# stream detection is done by the CLIENT (timing), not the model: the RNN
+# only ever sees '.'/'-' symbol ids (see code_to_seq).
 
 # sanity: unique codes, all fitting in MAX_LEN slots
 codes = [code for _, code in morse_data.MORSE_CODES]
@@ -247,9 +255,48 @@ def prefix_trace(model, device, code):
             print(f"    {prefix!r:>8} -> {morse_data.MORSE_CODES[pred][0]}")
 
 
+def stream_morse_to_text(model, segments, device):
+    """Option A: the client detects each letter break and resets the RNN.
+
+    segments = ['...', '---', '...'] (letter breaks already located by the
+    client, e.g. from the 3-unit gap timing). Symbols of one letter are fed
+    one by one into a persistent hidden state; at the break the client
+    classifies from the accumulated state, emits the letter, and resets the
+    state to zeros for the next letter. There are NO gap tokens in the input.
+    """
+    model.eval()
+    out, h = [], None
+    with torch.no_grad():
+        for seg in segments:
+            for ch in seg:                     # feed this letter's symbols
+                x = model.emb(code_to_seq(ch).unsqueeze(0).to(device))
+                _, h = model.gru(x, h)         # h None -> zeros (start letter)
+            pred = int(model.fc(h[-1]).argmax(1))
+            out.append(morse_data.MORSE_CODES[pred][0])
+            h = None                           # <-- reset on detected break
+    return "".join(out)
+
+
+def confidence_trace(model, code, device):
+    """P(correct letter) growing symbol by symbol; the client commits at the
+    detected break (readout happens there, but the ambiguity vanishes once
+    the last symbol of the letter is in the state)."""
+    idx = next(i for i, (_, c) in enumerate(morse_data.MORSE_CODES) if c == code)
+    target = morse_data.MORSE_CODES[idx][0]
+    model.eval()
+    h = None
+    with torch.no_grad():
+        for ch in code:
+            x = model.emb(code_to_seq(ch).unsqueeze(0).to(device))
+            _, h = model.gru(x, h)
+            prob = F.softmax(model.fc(h[-1]), dim=-1)[0, idx].item()
+            print(f"    after {ch}: P({target}) = {prob:.3f}")
+
+
 # ------------------------------------------------------------------ experiment
 def add_args(parser):
-    parser.add_argument("--model", choices=("mlp", "gru", "rnn"), default="mlp")
+    parser.add_argument("--model", choices=("mlp", "gru", "rnn", "stream"),
+                        default="mlp")
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
 
@@ -261,8 +308,11 @@ def run(args):
         random.seed(0)
     torch.manual_seed(0)
 
-    if args.model == "rnn":
-        print("== symbol-RNN: one symbol per step, variable length (memory) ==")
+    if args.model in ("rnn", "stream"):
+        if args.model == "rnn":
+            print("== symbol-RNN: one symbol per step, variable length (memory) ==")
+        else:
+            print("== stream: same RNN, client detects letter breaks and resets (Option A) ==")
         model = SymbolRNN().to(device)
         topology, params = common.model_summary(model)
         print(f"   device: {common.describe_device(device)}")
@@ -270,12 +320,21 @@ def run(args):
         train_seq_model(model, gen_seq_data(args.samples), device, epochs=args.epochs)
         eval_seq(model, device)
         print("\n== decode demo (trained net) ==")
-        print("  SOS  :", morse_to_text_seq(model, "... --- ...", device))
-        print("  HELLO:", morse_to_text_seq(model, ".... . .-.. .-.. ---", device))
-        print()
-        prefix_trace(model, device, "---")   # T -> M -> O
-        prefix_trace(model, device, ".-")    # E -> A
-        prefix_trace(model, device, "...")   # S is only decided on the 3rd dot
+        if args.model == "rnn":
+            print("  SOS  :", morse_to_text_seq(model, "... --- ...", device))
+            print("  HELLO:", morse_to_text_seq(model, ".... . .-.. .-.. ---", device))
+            print()
+            prefix_trace(model, device, "---")   # T -> M -> O
+            prefix_trace(model, device, "..")    # E -> I
+            prefix_trace(model, device, "...")   # S is only decided on the 3rd dot
+        else:
+            # client already found the breaks; RNN just consumed each letter's
+            # symbols and got reset by the client at every break
+            print("  SOS  :", stream_morse_to_text(model, ["...", "---", "..."], device))
+            print("  HELLO:", stream_morse_to_text(model, ["....", ".", ".-..", ".-..", "---"], device))
+            print("\n  confidence per symbol of one letter (client commits at the break):")
+            confidence_trace(model, ".-", device)
+            confidence_trace(model, "...", device)
     else:
         if args.model == "mlp":
             print("== parity-style MLP on padded fixed-length input ==")
