@@ -78,7 +78,7 @@ character. Three models, `--model <mlp|gru|rnn|stream>`:
    probability jumps only once its last symbol is in memory
 
 Every run prints the model's **topology and parameter count** (e.g.
-`topology: Embedding 2->8, GRU 8->32 x1, Linear 32->43 (1,987 parameters)`).
+`topology: Embedding 2->8, GRU 8->32 x1, Linear 32->43 (5,467 parameters)`).
 All models reach 100% (43/43) and end with a live demo decoding
 space-separated morse → text (SOS, HELLO). The still-unsolved variant —
 segmenting a continuous stream with no inter-symbol gaps — needs a search /
