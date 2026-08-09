@@ -77,11 +77,12 @@ def add_args(parser):
 
 def run(args):
     device = args.device
+    H = args.hidden or 64
     if args.seed is None:  # common.init_torch already seeded if --seed given
         random.seed(0)
         torch.manual_seed(0)
 
-    model = NNet(N_CLASSES, ((64, nn.ReLU()), (64, nn.ReLU()), MAX_SYMBOLS * 3)).to(device)
+    model = NNet(N_CLASSES, ((H, nn.ReLU()), (H, nn.ReLU()), MAX_SYMBOLS * 3)).to(device)
     print(f"== encode: char -> morse code, device: {common.describe_device(device)}")
     print(model)
     print(f"   size: {common.model_summary(model)[1]:,} parameters")

@@ -102,8 +102,13 @@ def run(args):
     print("   test  : all 128 possible bytes (exact function, finite table)")
     print(f"   device: {common.describe_device(device)}\n")
 
-    # active model: mostly reliable 100% (see history of commented archs below)
-    model = NNet(7, ((14, nn.Sigmoid()), (4, nn.Sigmoid()), 2)).to(device)
+    # active model: mostly reliable 100% (see history of commented archs below);
+    # --hidden N overrides the hand-tuned 14 -> max(2, N//4) layering
+    if args.hidden is None:
+        model = NNet(7, ((14, nn.Sigmoid()), (4, nn.Sigmoid()), 2)).to(device)
+    else:
+        H = args.hidden
+        model = NNet(7, ((H, nn.Sigmoid()), (max(2, H // 4), nn.Sigmoid()), 2)).to(device)
     print(f"   size   : {common.model_summary(model)[1]:,} parameters")
 
     train_data = generate_parity_data(args.samples)

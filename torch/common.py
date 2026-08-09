@@ -97,6 +97,11 @@ def add_torch_args(parser):
         "--threads", type=int, default=None,
         help="limit torch CPU threads (e.g. 2 on a shared machine)",
     )
+    parser.add_argument(
+        "--hidden", type=int, default=None,
+        help="model width: override the hidden-layer sizes (generic capacity "
+             "knob; default per model) -- try --model rnn --hidden 16/8/4",
+    )
 
 
 def finish_args(args):

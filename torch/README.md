@@ -33,6 +33,7 @@ Common flags (from `common.py`, applied to all ML subcommands):
 | `--seed N` | seed python+torch RNGs (default: per-experiment defaults) |
 | `--threads N` | limit torch CPU threads (useful on shared/loaded machines) |
 | `--epochs N`, `--samples N` | training length / dataset size (`--epochs` is a *cap*: training stops at loss ≤ 1e-4) |
+| `--hidden N` | model width override (generic capacity knob, default per model) — e.g. `--model rnn --hidden 16/8/4` reproduces the memorization knee below |
 
 Every run prints an explicit banner naming the device actually used, e.g.
 `[cli] run=morse-decode device=cuda:0 (NVIDIA RTX A2000 12GB)`.
@@ -45,6 +46,7 @@ Examples:
 ./cli.py parity-learn --acceleration cpu      # no GPU
 ./cli.py parity-learn --epochs 100 --threads 4
 ./cli.py morse-decode --model rnn --seed 7    # reproducible run
+./cli.py morse-decode --model rnn --hidden 16  # shrink the net (see sizes section)
 ./cli.py morse-translate <<< "SOS"           # ... --- ...
 ```
 
@@ -127,6 +129,10 @@ Takeaways:
   Overcapacity will only matter (positively) on generalization, i.e. noisy
   symbols, jittered timing, and continuous unsplit streams — none of which
   these toys test yet.
+
+You can reproduce the table live with the generic `--hidden` knob, e.g.
+`./cli.py morse-decode --model rnn --hidden 32|16|8|4` — the topology line
+shows the resulting parameter count.
 
 ## Support files
 
