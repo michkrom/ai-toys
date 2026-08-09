@@ -1,6 +1,20 @@
-# NN to predict a parity bit over 7 bit byte
-#
+#!/usr/bin/env python3
+"""
+parity.py — ML toy: learn the parity bit of a 7-bit byte (0..127).
+
+The network sees 7 input bits and predicts the even/odd parity bit
+(popcount % 2) as a 2-way classification. Data is synthesized on the fly,
+the net trains on random bytes, then is evaluated on ALL 128 possible bytes.
+
+Like a lookup table this is trivially memorizable, but it is the classic
+"first real ML" playground: a tiny exact function, clear labels, finite
+test set -- a good baseline pattern used by morseDecode.py too.
+"""
 import random
+import warnings
+
+warnings.filterwarnings("ignore")
+
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
@@ -107,6 +121,11 @@ model = NNet(7, ((14, nn.Sigmoid()), (4, nn.Sigmoid()), 2))
 # model = NNet(7, ((13, nn.Sigmoid()), (4, nn.Sigmoid()), 2))
 
 # Train
+print("== parity: learn the parity bit (popcount % 2) of a 7-bit byte ==")
+print("   input : 7 bits (0..127), e.g. 1011001 -> popcount 4 -> parity 0")
+print("   net   : 7 -> 14 -> 4 -> 2 logits, trained with MSE on one-hot labels")
+print("   test  : all 128 possible bytes (exact function, finite table)\n")
+
 num_samples = 10000
 train_data = generate_parity_data(num_samples)
 print("train data hash: ", signature(train_data))

@@ -1,96 +1,100 @@
+#!/usr/bin/env python3
+"""
+Morse encoder toy: learn to spell a character (A-Z, 0-9, punctuation,
+43 classes) in morse code.
+
+    input  : one-hot vector of the character index (43 dims)
+    output : 6 symbol slots, each classified as dot / dash / silence
+             (padding) -> 6*3 logits
+    loss   : per-position CrossEntropyLoss
+
+Because the input is just a character index, this is effectively a
+lookup-table task. The interesting generalization variants (audio-in,
+noisy sequence decoding) are the subject of morseDecode.py.
+"""
+import random
 import warnings
 
 warnings.filterwarnings("ignore")
+
 import torch
-from torch import nn
-from torch import optim
-from torch.utils.data import Dataset, DataLoader
-import numpy as np
-from utils import DatasetFeeder, NNet
+from torch.nn import functional as F
+
 import morseCode
-import random
+from utils import NNet
+
+MAX_SYMBOLS = 6
+N_SYMBOLS = len(morseCode.morseCode)  # 43 rows: letters, digits, punctuation
+SYMBOL_TARGETS = (".", "-", " ")
 
 
-def morse_to_onehot_list(mcode):
-    """mcode string of .- to a vector of probabilities where each 2 are p(dot) p(dash) probabilities"""
-    #   0 0 none
-    # . 1 0 dot
-    # - 0 1 dash
-    v = []
-    for m in mcode:
-        v = v + ([1, 0.5, 0.5] if m == "." else [0.5, 1, 0.5])
-    while len(v) < 3 * 6:
-        v = v + [0.5, 0.5, 1]
-    return v
+# ---------------------------------------------------------------- data
+def char_to_input(index):
+    """one-hot vector for a character index -- a proper NN input."""
+    x = torch.zeros(N_SYMBOLS)
+    x[index] = 1.0
+    return x
 
 
-def gen_data(dataLen):
-    """generate x: char -> [ 6 x p(dot) p(dash)  p(silence) ]"""
+def code_to_target(mcode):
+    """'.-' -> tensor(6,3) one-hot over (dot, dash, silence)."""
+    target = torch.zeros(MAX_SYMBOLS, 3)
+    target[:, 2] = 1.0  # silence by default (padding)
+    for pos, m in enumerate(mcode):
+        target[pos] = torch.tensor([1.0, 0.0, 0.0] if m == "." else [0.0, 1.0, 0.0])
+    return target
+
+
+def gen_data(data_len):
     data = []
-    alphabetLen = len(morseCode.morseCode)
-    for i in range(0, dataLen):
-        x = random.randint(0, alphabetLen)
-        code = morseCode.morseCode[x][1] if x < alphabetLen else ''
-        y = morse_to_onehot_list(code)
-        x_tensor = torch.tensor([x], dtype=torch.float32)
-        y_tensor = torch.tensor(y, dtype=torch.float32)
-        data.append((x_tensor, y_tensor))
+    for _ in range(data_len):
+        index = random.randrange(N_SYMBOLS)  # [0, N) -- no off-by-one
+        code = morseCode.morseCode[index][1]
+        data.append((char_to_input(index), code_to_target(code)))
     return data
 
 
-def probs_to_morse(y):
-    yv = y.view(6, 3)
-    m = ""
-    for i in torch.argmax(yv, dim=1):
-        m = m + [".", "-", " "][i.item()]
-    return m
+# ---------------------------------------------------------------- decode / eval
+def logits_to_morse(logits):
+    """tensor(18) logits -> string of '.', '-' and ' '."""
+    return "".join(SYMBOL_TARGETS[i] for i in logits.view(6, 3).argmax(dim=1))
 
 
 def check_data(data):
+    """Verify the encoders are consistent: index -> code -> target -> code."""
     for x, y in data:
-        m1 = morseCode.morseCode[int(x[0])][1] if x < len(morseCode.morseCode) else ''
-        m2 = probs_to_morse(y)
-        if m1 != m2.strip():
-            print(x, m1, m2)
-            return
+        index = int(x.argmax().item())
+        code = morseCode.morseCode[index][1]
+        decoded = logits_to_morse(y.view(-1)).replace(" ", "")
+        assert code == decoded, (index, code, decoded)
 
 
 def test_inference():
     good = 0
-    for i in range(0, len(morseCode.morseCode)):
-        y = model(torch.tensor([i], dtype=torch.float32))
-        m = morseCode.morseCode[i]
-        mi = probs_to_morse(y).strip()
-        if m[1] == mi:
-            good = good+1
-        else:
-            print(f"{m[0]} |{m[1]}|, |{mi}| ")
-    print(f"{int(100*good/len(morseCode.morseCode))}%")
+    for index in range(N_SYMBOLS):
+        char, expected = morseCode.morseCode[index]
+        predicted = logits_to_morse(model(char_to_input(index))).replace(" ", "")
+        good += expected == predicted
+        if expected != predicted:
+            print(f"{char} |{expected}|, |{predicted}|")
+    print(f"{int(100 * good / N_SYMBOLS)}% ({good}/{N_SYMBOLS})")
 
 
-# deeper netowrk performed much better, with 2 layers best accy was 75%, this 4 layers gets to 100%
-model = NNet(1, ((64, nn.Sigmoid()), (64, nn.Sigmoid()), (44, nn.Sigmoid()), (6 * 3)))
+def seq_cross_entropy(logits, targets):
+    """(B,18) logits + (B,6,3) one-hot targets -> CE over all 6 positions."""
+    return F.cross_entropy(logits.view(-1, 3), targets.view(-1, 3).argmax(dim=-1))
+
+
+# ---------------------------------------------------------------- model
+torch.manual_seed(0)
+random.seed(0)
+
+# small net: one-hot(43) -> 64 -> 64 -> 18 logits
+model = NNet(N_SYMBOLS, ((64, torch.nn.ReLU()), (64, torch.nn.ReLU()), MAX_SYMBOLS * 3))
 print(model)
 
-train_data = gen_data(10000)
+train_data = gen_data(20000)
 check_data(train_data)
 
-# gross
-model.train(
-    train_data, epochs=30, learning_rate=0.01, criterion=nn.MSELoss()
-)
+model.train(train_data, epochs=30, learning_rate=0.001, criterion=seq_cross_entropy)
 test_inference()
-
-# tuneup
-train_data = gen_data(10000)
-model.train(
-    train_data, epochs=30, learning_rate=0.001, criterion=nn.MSELoss()
-)
-test_inference()
-
-train_data = gen_data(10000)
-model.train(
-    train_data, epochs=50, learning_rate=0.0001, criterion=nn.MSELoss()
-)
-test_inference()
-

@@ -1,6 +1,5 @@
 # torch utils
 #
-import random
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
@@ -35,21 +34,27 @@ class NNet(nn.Module):
             input_dim = dim
 
     def forward(self, x):
-        for transfom, activation in self.layers:
-            x = transfom(x)
+        for transform, activation in self.layers:
+            x = transform(x)
             if activation is not None:
                 x = activation(x)
         return x
 
     def train(
         self,
-        train_data,
-        epochs,
-        learning_rate,
+        train_data=None,
+        epochs=None,
+        learning_rate=None,
         optimizer=None,
         criterion=None,
         progress_reporter=None,
     ):
+        # Our signature shadows nn.Module.train(mode). Support the base-class
+        # call style so containers can toggle mode / eval() without breaking.
+        if isinstance(train_data, bool) and epochs is None and learning_rate is None:
+            return super().train(train_data)
+        if train_data is None:
+            raise TypeError("NNet.train() requires train_data")
         if optimizer is None:
             optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
         if criterion is None:
@@ -73,18 +78,18 @@ class NNet(nn.Module):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-            train_loss_values.append((epoch, loss.item))
+            train_loss_values.append((epoch, loss.item()))
             progress_reporter(epoch + 1, loss.item())
 
         self.train_loss_values = train_loss_values
 
-    def visualize_training():
+    def visualize_training(self):
         import matplotlib.pyplot as plt
 
-        step = np.linspace(0, 100, 10500)
-        fig, ax = plt.subplots(figsize=(8, 5))
-        plt.plot(step, np.array(loss_values))
-        plt.title("Step-wise Loss")
-        plt.xlabel("Epochs")
+        epochs, losses = zip(*self.train_loss_values)
+        plt.figure(figsize=(8, 5))
+        plt.plot(epochs, losses)
+        plt.title("Training Loss")
+        plt.xlabel("Epoch")
         plt.ylabel("Loss")
         plt.show()
