@@ -253,7 +253,7 @@ def prefix_traces(model, device):
                 x = model.emb(code_to_seq(ch).unsqueeze(0).to(device))
                 _, h = model.gru(x, h)
                 pred = morse_data.MORSE_CODES[int(model.fc(h[-1]).argmax(1))][0]
-                steps.append(f"{ch}->{pred}")
+                steps.append(f"{ch} ==> {pred}")
             print(f"  {char} {code:<6} : {', '.join(steps)}")
 
 
