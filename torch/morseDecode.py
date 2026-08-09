@@ -313,7 +313,7 @@ def run(args):
             print("== symbol-RNN: one symbol per step, variable length (memory) ==")
         else:
             print("== stream: same RNN, client detects letter breaks and resets (Option A) ==")
-        hidden = args.hidden or 32
+        hidden = args.hidden or 8   # minimal-but-working default (floor is 8; 4 fails)
         model = SymbolRNN(vocab=2, embed=max(2, hidden // 4), hidden=hidden).to(device)
         topology, params = common.model_summary(model)
         print(f"   device: {common.describe_device(device)}")
@@ -337,13 +337,13 @@ def run(args):
     else:
         if args.model == "mlp":
             print("== parity-style MLP on padded fixed-length input ==")
-            H = args.hidden or 64
+            H = args.hidden or 8   # minimal-but-working default (floor is 4)
             model = FlattenMLP(
                 NNet(MAX_LEN * 3, ((H, nn.ReLU()), (H, nn.ReLU()), N_CLASSES))
             ).to(device)
         else:
             print("== GRU sequence model ==")
-            model = GRUClassifier(hidden=args.hidden or 32).to(device)
+            model = GRUClassifier(hidden=args.hidden or 8).to(device)  # floor 8; 4 fails
         topology, params = common.model_summary(model)
         print(f"   device: {common.describe_device(device)}")
         print(f"   topology: {topology}   ({params:,} parameters)")

@@ -77,7 +77,7 @@ def add_args(parser):
 
 def run(args):
     device = args.device
-    H = args.hidden or 64
+    H = args.hidden or 8   # minimal-but-working default (floor is 4; 2 fails)
     if args.seed is None:  # common.init_torch already seeded if --seed given
         random.seed(0)
         torch.manual_seed(0)

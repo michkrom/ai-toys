@@ -85,7 +85,7 @@ character. Four models, `--model <mlp|gru|rnn|stream>`:
    memory (e.g. `J .--- : 0.00 0.00 0.00 1.00`)
 
 Every run prints the model's **topology and parameter count** (e.g.
-`topology: Embedding 2->8, GRU 8->32 x1, Linear 32->43 (5,467 parameters)`).
+`topology: Embedding 2->2, GRU 2->8 x1, Linear 8->43 (679 parameters)`).
 All models reach 100% (43/43) and end with a live demo decoding
 space-separated morse → text (SOS, HELLO). The still-unsolved variant —
 segmenting a continuous stream with no inter-symbol gaps — needs a search /
@@ -100,47 +100,32 @@ ML" playground and the baseline pattern for the other experiments.
 ## Model sizes vs. problem size
 
 These toys are finite-table tasks, so the interesting question is how much
-capacity they actually *need*. Measured (morse-decode RNN with `embed=8`):
+capacity they actually *need*. The defaults are tuned to the measured floors:
 
-| model | params | × 43-entry table | accuracy |
-|---|---|---|---|
-| decode `mlp` | 8,171 | 190× | 100% |
-| decode `gru` | 4,971 | 116× | 100% |
-| decode `rnn` hidden=32 (default) | 5,467 | 127× | 100% |
-| decode `rnn` hidden=16 | 1,995 | 46× | 100% |
-| decode `rnn` hidden=8 | 835 | 19× | 90% |
-| decode `rnn` hidden=4 | 399 | 9× | 30% |
-| encode MLP | 8,146 | 190× | 100% |
-| parity MLP | 182 | 1.4× (vs 128 input patterns) | 100% |
+| model | default params | × 43-entry table | floor | below floor |
+|---|---|---|---|---|
+| decode `mlp` | 611 | 14× | hidden=4 | — |
+| decode `gru` | 699 | 16× | hidden=8 | hidden=4 (65%) |
+| decode `rnn`/`stream` | 679 | 16× | hidden=8 | hidden=4 (58%) |
+| encode MLP | 586 | 14× | hidden=4 | hidden=2 (39%) |
+| parity MLP | 182 | 1.4× (vs 128 inputs) | hand-tuned | seed-sensitive |
 
 Takeaways:
 
 - **Only `parity` is near-minimal** (182 params vs 128 patterns). Its parity
   function has real XOR-like structure, so capacity ≈ problem size — also why
   architecture and seeds historically mattered for it.
-- **The morse toys carry 20–190× the capacity the 43-row table needs.** The
-  memorization knee is at hidden=16 (~46×); below it the net starts failing
-  to memorize. Everything above is dead weight for a finite table.
+- **The one-of-N input tax**: `encode` / `decode mlp` read one-hot inputs
+  (43-dim / 18-dim), so their first layer spends `input_dim × H` weights just
+  on the lookup; the RNN's `Embedding 2->d` on a tiny vocabulary avoids that,
+  and `parity`'s raw 7 bits have no tax at all.
 - **RNN params do not scale with sequence length** — weight sharing across
-  timesteps keeps the ~5.5k count constant whether the code is `E` (1 symbol)
-  or `-.--.-` (6 symbols). That constant is what the MLP's growing padded
-  input does *not* have.
+  timesteps keeps the count constant whether the code is `E` (1 symbol) or
+  `-.--.-` (6 symbols).
 - **Capacity ≠ quality on finite tasks**: all these get 100% by memorizing.
   Overcapacity will only matter (positively) on generalization, i.e. noisy
   symbols, jittered timing, and continuous unsplit streams — none of which
   these toys test yet.
 
-You can reproduce the table live with the generic `--hidden` knob, e.g.
-`./cli.py morse-decode --model rnn --hidden 32|16|8|4` — the topology line
-shows the resulting parameter count.
-
-## Support files
-
-- `cli.py` — single CLI entry point (subcommands, one torch init per run).
-- `common.py` — shared torch init: warnings,
-  `--acceleration/--seed/--threads`, device banner, `model_summary`.
-- `utils.py` — `NNet` (generic MLP with train loop, early stop) and
-  `DatasetFeeder`.
-- `morse_data.py` — morse table (43 entries) + pure text↔code helpers, used by
-  the experiments and the `morse-translate` subcommand (no torch,
-  import-safe).
+You can reproduce the floors live with the generic `--hidden` knob:
+`./cli.py morse-decode --model rnn --hidden 16|8|4` (8 = 100%, 4 = 58%).
